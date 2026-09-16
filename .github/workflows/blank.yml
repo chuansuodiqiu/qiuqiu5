@@ -1,0 +1,100 @@
+name: ws scan
+
+on:
+  schedule:
+    - cron: "0 */2 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Make warpscout executable
+        run: chmod +x ./warpscout
+
+      - name: Ensure WARP account
+        run: |
+          if [ -f ./warpscout-account.json ]; then
+            echo "已存在 warpscout-account.json，跳过 register"
+          else
+            echo "未找到 warpscout-account.json，执行 register"
+            ./warpscout register
+            sleep 2
+            if [ ! -f ./warpscout-account.json ]; then
+              echo "register 后仍未生成 warpscout-account.json，退出"
+              exit 1
+            fi
+            echo "register 完成"
+          fi
+
+      - name: Run scan
+        run: ./warpscout scan -p masque -masque-sni www.apple.com -n 1
+
+      - name: Wait for json to appear
+        run: |
+          shopt -s nullglob
+          for i in $(seq 1 10); do
+            files=( ./*.txt )
+            # 排除 account 文件本身
+            filtered=()
+            for f in "${files[@]}"; do
+              if [ "$f" != "./warpscout-account.json" ]; then
+                filtered+=("$f")
+              fi
+            done
+            if [ ${#filtered[@]} -gt 0 ]; then
+              echo "检测到 json 文件：${filtered[*]}"
+              sleep 2
+              ok=1
+              for f in "${filtered[@]}"; do
+                if [ ! -s "$f" ]; then
+                  echo "文件为空：$f"
+                  ok=0
+                fi
+              done
+              if [ "$ok" -eq 1 ]; then
+                exit 0
+              fi
+            fi
+            echo "第 $i 次未检测到有效 json，等待 2 秒..."
+            sleep 2
+          done
+          echo "超时：始终没有生成有效的 .json 文件"
+          exit 1
+
+      - name: Commit generated json
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          shopt -s nullglob
+          files=( ./*.txt )
+          # 排除 account 文件，只提交扫描结果
+          filtered=()
+          for f in "${files[@]}"; do
+            if [ "$f" != "./warpscout-account.json" ]; then
+              filtered+=("$f")
+            fi
+          done
+
+          if [ ${#filtered[@]} -eq 0 ]; then
+            echo "没有找到扫描生成的 .json 文件，跳过提交"
+            exit 0
+          fi
+
+          git add "${filtered[@]}"
+
+          if git diff --cached --quiet; then
+            echo "没有变更，跳过提交"
+            exit 0
+          fi
+
+          git commit -m "chore: update warpscout scan json [skip ci]"
+          git push
